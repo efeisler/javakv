@@ -16,9 +16,10 @@ public final class ServerMain {
         ServerConfig defaults = ServerConfig.defaults();
         int port = args.length > 0 ? Integer.parseInt(args[0]) : defaults.port();
         Path dataDir = args.length > 1 ? Path.of(args[1]) : defaults.dataDir();
+        long flushThresholdBytes = args.length > 2 ? Long.parseLong(args[2]) : KvEngine.DEFAULT_FLUSH_THRESHOLD_BYTES;
         ServerConfig config = new ServerConfig(port, defaults.threadPoolSize(), dataDir);
 
-        KvEngine engine = new KvEngine(config.dataDir());
+        KvEngine engine = new KvEngine(config.dataDir(), flushThresholdBytes);
         KvServer server = new KvServer(config, engine);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.close();

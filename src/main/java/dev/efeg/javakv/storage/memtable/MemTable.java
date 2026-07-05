@@ -3,6 +3,8 @@ package dev.efeg.javakv.storage.memtable;
 import dev.efeg.javakv.storage.Record;
 import dev.efeg.javakv.util.Bytes;
 
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -29,6 +31,11 @@ public final class MemTable {
 
     public long approxSizeBytes() {
         return approxSizeBytes.get();
+    }
+
+    /** Entries in ascending key order, exactly what an SSTable flush needs to stream out sorted. */
+    public Set<Map.Entry<byte[], Record>> entrySet() {
+        return entries.entrySet();
     }
 
     private static long entrySize(byte[] key, Record record) {
