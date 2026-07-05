@@ -8,6 +8,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Accepts TCP connections and dispatches each to a {@link ClientHandler} on a pooled thread.
@@ -57,14 +58,28 @@ public final class KvServer implements Closeable {
         }
     }
 
+    /**
+     * Graceful shutdown: stop accepting first, then let in-flight requests drain (bounded, so a
+     * stuck client can't hang shutdown forever) before returning. Safe to call from a shutdown
+     * hook right before closing the {@link KvEngine} — no handler thread should still be touching
+     * it once this returns.
+     */
     @Override
     public void close() {
         running = false;
-        pool.shutdown();
         try {
             serverSocket.close();
         } catch (IOException ignored) {
             // Already closed or never opened; nothing more to do.
+        }
+        pool.shutdown();
+        try {
+            if (!pool.awaitTermination(10, TimeUnit.SECONDS)) {
+                pool.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            pool.shutdownNow();
+            Thread.currentThread().interrupt();
         }
     }
 }

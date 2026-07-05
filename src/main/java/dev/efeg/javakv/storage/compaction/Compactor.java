@@ -102,11 +102,14 @@ public final class Compactor {
                 while (!queue.isEmpty() && Bytes.COMPARATOR.compare(queue.peek().current().getKey(), winner.getKey()) == 0) {
                     requeueIfMore(queue.poll());
                 }
-                if (!winner.getValue().isTombstone()) {
+                Record record = winner.getValue();
+                if (!record.isTombstone() && !record.isExpired(System.currentTimeMillis())) {
                     pending = winner;
                     return;
                 }
-                // winner was a tombstone: safe to drop under global compaction; keep scanning
+                // winner was a tombstone or its TTL has lapsed: safe to drop under global
+                // compaction (a bonus cleanup beyond what lazy per-read expiry already does);
+                // keep scanning for the next live key
             }
         }
 

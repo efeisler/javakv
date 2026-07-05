@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -42,6 +43,7 @@ public final class KvEngine implements Closeable {
     private final AtomicInteger nextSstableGeneration = new AtomicInteger();
     private final WalManager walManager;
     private final Compactor compactor;
+    private final Clock clock;
 
     // Non-null only while a flush is in flight. Reads must be checked in this exact order
     // (active -> frozen -> sstables): the flush() method publishes the new SSTable into
@@ -60,9 +62,15 @@ public final class KvEngine implements Closeable {
     }
 
     public KvEngine(Path dataDir, long flushThresholdBytes, int compactionTriggerCount) throws IOException {
+        this(dataDir, flushThresholdBytes, compactionTriggerCount, Clock.systemUTC());
+    }
+
+    /** Test-only entry point: injecting a {@link Clock} makes TTL expiry deterministic to test. */
+    public KvEngine(Path dataDir, long flushThresholdBytes, int compactionTriggerCount, Clock clock) throws IOException {
         this.dataDir = dataDir;
         this.flushThresholdBytes = flushThresholdBytes;
         this.compactionTriggerCount = compactionTriggerCount;
+        this.clock = clock;
         Files.createDirectories(dataDir);
 
         deleteOrphanedTempFiles();
@@ -145,10 +153,12 @@ public final class KvEngine implements Closeable {
 
     public byte[] get(byte[] key) throws IOException {
         Record record = lookup(key);
-        if (record == null || record.isTombstone()) {
-            return null;
-        }
-        return record.value();
+        return isLive(record) ? record.value() : null;
+    }
+
+    /** A tombstone or an expired TTL both mean "no value here" — lazily evaluated at read time. */
+    private boolean isLive(Record record) {
+        return record != null && !record.isTombstone() && !record.isExpired(clock.millis());
     }
 
     /** Checks active -> frozen -> sstables, in that order, and stops at the first hit. */
@@ -187,8 +197,7 @@ public final class KvEngine implements Closeable {
         boolean existed;
         writeLock.lock();
         try {
-            Record existing = lookup(key);
-            existed = existing != null && !existing.isTombstone();
+            existed = isLive(lookup(key));
             walManager.append(new WalRecord(key, null, 0));
             active.get().put(key, Record.tombstone());
             job = maybeTriggerFlush();
