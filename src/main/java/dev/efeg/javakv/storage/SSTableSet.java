@@ -17,9 +17,16 @@ public final class SSTableSet {
 
     public Record get(byte[] key) throws IOException {
         for (SSTableReader reader : readers.get()) {
-            Record record = reader.get(key);
-            if (record != null) {
-                return record;
+            if (!reader.tryAcquire()) {
+                continue; // being retired concurrently; a replacement already covers its data
+            }
+            try {
+                Record record = reader.get(key);
+                if (record != null) {
+                    return record;
+                }
+            } finally {
+                reader.release();
             }
         }
         return null;
@@ -35,6 +42,36 @@ public final class SSTableSet {
         });
     }
 
+    /** Current live tables, newest first. */
+    public List<SSTableReader> snapshot() {
+        return readers.get();
+    }
+
+    /**
+     * Atomically replaces every table in {@code mergedFrom} with {@code merged}, preserving any
+     * table that was concurrently added (e.g. by a flush) after {@code mergedFrom} was snapshotted
+     * — those are newer than the merge and are kept in front of it. Returns once the swap lands;
+     * the caller is responsible for calling {@code retire()} on each table in {@code mergedFrom}.
+     */
+    public void publishCompacted(List<SSTableReader> mergedFrom, SSTableReader merged) {
+        while (true) {
+            List<SSTableReader> current = readers.get();
+            List<SSTableReader> addedSinceSnapshot = new ArrayList<>();
+            for (SSTableReader reader : current) {
+                if (!mergedFrom.contains(reader)) {
+                    addedSinceSnapshot.add(reader);
+                }
+            }
+            List<SSTableReader> replacement = new ArrayList<>(addedSinceSnapshot.size() + 1);
+            replacement.addAll(addedSinceSnapshot);
+            replacement.add(merged);
+            if (readers.compareAndSet(current, List.copyOf(replacement))) {
+                return;
+            }
+        }
+    }
+
+    /** Normal shutdown: releases handles only, does not delete any files. */
     public void closeAll() throws IOException {
         for (SSTableReader reader : readers.get()) {
             reader.close();

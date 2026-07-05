@@ -19,7 +19,8 @@ class KvEngineFlushTest {
 
     @Test
     void forcesMultipleFlushesAndStillResolvesEveryKey() throws IOException {
-        KvEngine engine = new KvEngine(dataDir, 200); // tiny threshold forces several flushes
+        // Compaction disabled (huge trigger count) so this purely exercises flush behavior.
+        KvEngine engine = new KvEngine(dataDir, 200, Integer.MAX_VALUE);
         int total = 50;
         for (int i = 0; i < total; i++) {
             engine.put(key(i), value(i), 0);

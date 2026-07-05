@@ -1,5 +1,6 @@
 package dev.efeg.javakv.storage;
 
+import dev.efeg.javakv.storage.compaction.Compactor;
 import dev.efeg.javakv.storage.memtable.MemTable;
 import dev.efeg.javakv.storage.sstable.SSTableReader;
 import dev.efeg.javakv.storage.sstable.SSTableWriter;
@@ -30,14 +31,17 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class KvEngine implements Closeable {
 
     public static final long DEFAULT_FLUSH_THRESHOLD_BYTES = 4L * 1024 * 1024;
+    public static final int DEFAULT_COMPACTION_TRIGGER_COUNT = 4;
 
     private final Path dataDir;
     private final long flushThresholdBytes;
+    private final int compactionTriggerCount;
     private final AtomicReference<MemTable> active = new AtomicReference<>(new MemTable());
     private final SSTableSet sstables = new SSTableSet();
     private final ReentrantLock writeLock = new ReentrantLock();
     private final AtomicInteger nextSstableGeneration = new AtomicInteger();
     private final WalManager walManager;
+    private final Compactor compactor;
 
     // Non-null only while a flush is in flight. Reads must be checked in this exact order
     // (active -> frozen -> sstables): the flush() method publishes the new SSTable into
@@ -52,11 +56,18 @@ public final class KvEngine implements Closeable {
     }
 
     public KvEngine(Path dataDir, long flushThresholdBytes) throws IOException {
+        this(dataDir, flushThresholdBytes, DEFAULT_COMPACTION_TRIGGER_COUNT);
+    }
+
+    public KvEngine(Path dataDir, long flushThresholdBytes, int compactionTriggerCount) throws IOException {
         this.dataDir = dataDir;
         this.flushThresholdBytes = flushThresholdBytes;
+        this.compactionTriggerCount = compactionTriggerCount;
         Files.createDirectories(dataDir);
 
+        deleteOrphanedTempFiles();
         loadExistingSstables();
+        this.compactor = new Compactor(dataDir, sstables, nextSstableGeneration);
 
         List<Integer> walGenerations = WalManager.existingGenerations(dataDir);
         for (int generation : walGenerations) {
@@ -75,6 +86,20 @@ public final class KvEngine implements Closeable {
         }
         for (int generation : walGenerations) {
             Files.deleteIfExists(WalManager.segmentPath(dataDir, generation));
+        }
+    }
+
+    /**
+     * Removes {@code *.sst.tmp} files left behind by a flush or compaction that crashed before
+     * its atomic rename completed. Safe to delete unconditionally: a reader is only ever handed
+     * the final {@code .sst} file after the rename succeeds, so a leftover {@code .tmp} was never
+     * visible to anything and never contributed data that needs to be preserved.
+     */
+    private void deleteOrphanedTempFiles() throws IOException {
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dataDir, "*.sst.tmp")) {
+            for (Path path : stream) {
+                Files.deleteIfExists(path);
+            }
         }
     }
 
@@ -205,6 +230,8 @@ public final class KvEngine implements Closeable {
             writeLock.unlock();
         }
         walManager.deleteSegment(job.sealedWalGeneration());
+
+        compactor.compactIfNeeded(compactionTriggerCount);
     }
 
     @Override

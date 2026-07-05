@@ -9,23 +9,41 @@ import java.io.DataInputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.concurrent.atomic.AtomicInteger;
 
-/** Read-only handle onto one immutable SSTable file written by {@link SSTableWriter}. */
+/**
+ * Read-only handle onto one immutable SSTable file written by {@link SSTableWriter}.
+ *
+ * <p>Reference-counted so the compactor can safely delete a superseded file: the file is only
+ * closed and physically deleted once every in-flight {@link #get} caller has released it — this
+ * matters especially on Windows, which refuses to delete a file that still has an open handle.
+ * Normal shutdown ({@link #close}) is a separate, simpler path that just releases the handle
+ * without deleting the file, since the table is still needed on the next restart.
+ */
 public final class SSTableReader implements Closeable {
 
     private static final int FOOTER_SIZE = 24;
 
+    private final Path file;
     private final FileChannel channel;
     private final List<IndexEntry> index;
     private final long dataSectionEnd;
+    private final AtomicInteger refCount = new AtomicInteger(1);
+    private volatile boolean retired;
 
-    private SSTableReader(FileChannel channel, List<IndexEntry> index, long dataSectionEnd) {
+    private SSTableReader(Path file, FileChannel channel, List<IndexEntry> index, long dataSectionEnd) {
+        this.file = file;
         this.channel = channel;
         this.index = index;
         this.dataSectionEnd = dataSectionEnd;
@@ -55,7 +73,47 @@ public final class SSTableReader implements Closeable {
             index.add(new IndexEntry(key, dataOffset));
         }
 
-        return new SSTableReader(channel, index, indexOffset);
+        return new SSTableReader(file, channel, index, indexOffset);
+    }
+
+    /** Tries to record a new user of this table; fails if it has already been fully retired. */
+    public boolean tryAcquire() {
+        while (true) {
+            int current = refCount.get();
+            if (current <= 0) {
+                return false;
+            }
+            if (refCount.compareAndSet(current, current + 1)) {
+                return true;
+            }
+        }
+    }
+
+    /** Releases a reference obtained via {@link #tryAcquire}; deletes the file if this was the last one. */
+    public void release() {
+        if (refCount.decrementAndGet() == 0 && retired) {
+            closeAndDelete();
+        }
+    }
+
+    /** Called by the compactor once this table has been superseded and removed from the live set. */
+    public void retire() {
+        retired = true;
+        release(); // releases the implicit reference this reader was created with
+    }
+
+    private void closeAndDelete() {
+        try {
+            channel.close();
+        } catch (IOException ignored) {
+            // Best-effort; nothing more to do if the handle won't close cleanly.
+        }
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException ignored) {
+            // Best-effort: a leftover file (e.g. antivirus briefly holding a handle on Windows) is
+            // harmless — the next compaction pass will fold it in again and retry the deletion.
+        }
     }
 
     /** Returns the stored record for {@code key} (which may be a tombstone), or {@code null} if absent. */
@@ -81,6 +139,11 @@ public final class SSTableReader implements Closeable {
             }
         }
         return null;
+    }
+
+    /** Streams every entry in ascending key order, as written — used by the compactor's merge. */
+    public Iterator<Map.Entry<byte[], Record>> entryIterator() {
+        return new EntryIterator();
     }
 
     private int floorIndex(byte[] key) {
@@ -117,12 +180,51 @@ public final class SSTableReader implements Closeable {
         }
     }
 
+    /** Normal shutdown: release the handle only, keep the file on disk for the next restart. */
     @Override
     public void close() throws IOException {
         channel.close();
     }
 
     private record IndexEntry(byte[] key, long dataOffset) {
+    }
+
+    private final class EntryIterator implements Iterator<Map.Entry<byte[], Record>> {
+        private final PositionalInputStream positional = new PositionalInputStream(channel, 0);
+        private final DataInputStream in = new DataInputStream(positional);
+        private Map.Entry<byte[], Record> next;
+
+        EntryIterator() {
+            advance();
+        }
+
+        private void advance() {
+            if (positional.position() >= dataSectionEnd) {
+                next = null;
+                return;
+            }
+            try {
+                RecordCodec.Decoded decoded = RecordCodec.decode(in);
+                next = decoded == null ? null : Map.entry(decoded.key(), decoded.isTombstone() ? Record.tombstone() : toRecord(decoded));
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+
+        @Override
+        public boolean hasNext() {
+            return next != null;
+        }
+
+        @Override
+        public Map.Entry<byte[], Record> next() {
+            if (next == null) {
+                throw new NoSuchElementException();
+            }
+            Map.Entry<byte[], Record> current = next;
+            advance();
+            return current;
+        }
     }
 
     /**
