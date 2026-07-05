@@ -5,6 +5,7 @@ import dev.efeg.javakv.net.ServerConfig;
 import dev.efeg.javakv.storage.KvEngine;
 
 import java.io.IOException;
+import java.nio.file.Path;
 
 public final class ServerMain {
 
@@ -12,11 +13,21 @@ public final class ServerMain {
     }
 
     public static void main(String[] args) throws IOException {
-        int port = args.length > 0 ? Integer.parseInt(args[0]) : ServerConfig.defaults().port();
-        ServerConfig config = new ServerConfig(port, ServerConfig.defaults().threadPoolSize());
-        KvEngine engine = new KvEngine();
+        ServerConfig defaults = ServerConfig.defaults();
+        int port = args.length > 0 ? Integer.parseInt(args[0]) : defaults.port();
+        Path dataDir = args.length > 1 ? Path.of(args[1]) : defaults.dataDir();
+        ServerConfig config = new ServerConfig(port, defaults.threadPoolSize(), dataDir);
+
+        KvEngine engine = new KvEngine(config.dataDir());
         KvServer server = new KvServer(config, engine);
-        Runtime.getRuntime().addShutdownHook(new Thread(server::close));
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            server.close();
+            try {
+                engine.close();
+            } catch (IOException ignored) {
+                // Best-effort on shutdown; the WAL is already fsynced after every write.
+            }
+        }));
         server.start();
     }
 }

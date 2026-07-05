@@ -6,12 +6,17 @@ import dev.efeg.javakv.net.ServerConfig;
 import dev.efeg.javakv.storage.KvEngine;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class ServerIntegrationTest {
+
+    @TempDir
+    Path dataDir;
 
     private KvServer server;
 
@@ -58,8 +63,9 @@ class ServerIntegrationTest {
         }
     }
 
-    private static KvServer startServerOnEphemeralPort() throws IOException {
-        KvServer server = new KvServer(new ServerConfig(0, 8), new KvEngine());
+    private KvServer startServerOnEphemeralPort() throws IOException {
+        ServerConfig config = new ServerConfig(0, 8, dataDir);
+        KvServer server = new KvServer(config, new KvEngine(dataDir));
         server.start();
         return server;
     }

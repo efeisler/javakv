@@ -46,6 +46,8 @@ final class ClientHandler implements Runnable {
                     response = handle(command);
                 } catch (ProtocolException e) {
                     response = ResponseWriter.error(e.getMessage());
+                } catch (IOException e) {
+                    response = ResponseWriter.error("internal error: " + e.getMessage());
                 }
                 out.write(response.getBytes(StandardCharsets.UTF_8));
                 out.flush();
@@ -58,7 +60,7 @@ final class ClientHandler implements Runnable {
         }
     }
 
-    private String handle(Command command) {
+    private String handle(Command command) throws IOException {
         return switch (command) {
             case PingCommand c -> ResponseWriter.pong();
             case QuitCommand c -> ResponseWriter.ok();
